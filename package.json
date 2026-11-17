@@ -58,5 +58,9 @@
     "literature",
     "papers"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/StressState/dsh-paper-agent.git"
+  }
 }
