@@ -1,0 +1,9 @@
+# bundle 补丁：把本插件挂进 host 组合树（一行）
+- insert:
+    - id: paper-agent
+      name: dsh-paper-agent
+      config:
+        stateDir: .paper-agent
+        workspace: ''
+        openalexKey: ''
+        contactEmail: ''

@@ -1,0 +1,10 @@
+node_modules/
+.env
+.env.*
+.paper-agent/
+exports/
+logs/
+*.tgz
+*.log
+.DS_Store
+coverage/

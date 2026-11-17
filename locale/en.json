@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Paper agent (OpenAlex)",
+    "description": "Fetch papers from OpenAlex per research direction: direction config, query testing, month-window pagination, dedupe library and export."
+  }
+}

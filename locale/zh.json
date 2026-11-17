@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "文献拉取（OpenAlex）",
+    "description": "按研究方向从 OpenAlex 拉取论文：方向配置、条件测试、月份窗口分页拉取、去重库与导出。"
+  }
+}
