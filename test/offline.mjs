@@ -27,6 +27,10 @@ const ROOT = process.env.PAPER_AGENT_ROOT
   ? path.resolve(process.env.PAPER_AGENT_ROOT)
   : path.resolve(TEST_DIR, '..');
 
+// 测试隔离：让 lastworkspace 等 host 状态写进临时 DSH_HOME，绝不污染真实 ~/.dsh
+const TEST_DSH_HOME = await fsp.mkdtemp(path.join(os.tmpdir(), 'paper-agent-home-'));
+process.env.DSH_HOME = TEST_DSH_HOME;
+
 let failures = 0;
 function check(label, fn) {
   try {
@@ -150,6 +154,14 @@ check('面板渲染不抛异常', () => {
   render(react.createElement(registered['main:paper-agent'], {}));
 });
 
+// 回归：状态未加载/加载失败时，设置面板仍必须能打开（draft 用默认值兜底）
+const originalUseState = react.useState;
+react.useState = (initial) => [typeof initial === 'boolean' ? true : (typeof initial === 'function' ? initial() : initial), () => {}];
+check('设置面板在未加载状态下可渲染', () => {
+  render(react.createElement(registered['main:paper-agent'], {}));
+});
+react.useState = originalUseState;
+
 // ---------------------------------------------------------------- 3. 数据服务
 const { createService } = await import(pathToFileURL(path.join(ROOT, 'lib/service.js')).href);
 const { createDispatcher } = await import(pathToFileURL(path.join(ROOT, 'lib/dispatch.js')).href);
@@ -187,11 +199,13 @@ await checkAsync('方向保存/列表', async () => {
   const list = await dispatcher.dispatch('directions', { workspace, op: 'list' });
   assert.equal(list.directions.length, 1);
   assert.equal(list.directions[0].mode, 'text');
+  assert.ok(list.directions[0].context.length > 0, '首次保存方向应生成（或兜底出）方向上下文');
 });
 await checkAsync('卡片队列默认只返回未读', async () => {
   const cards = await dispatcher.dispatch('cards', { workspace });
   assert.equal(cards.total, 1);
   assert.equal(cards.items[0].openalexId, 'W1001');
+  assert.ok(Array.isArray(cards.items[0].directions) && cards.items[0].directions.includes('dir-1'), '卡片应带完整方向列表，供待读按方向筛选');
 });
 await checkAsync('评分保存 → 从未读移除 → 出现在回顾', async () => {
   await dispatcher.dispatch('rate', { workspace, openalexId: 'W1001', doi: '10.1000/a', direction: 'dir-1', rating: 5, note: '值得跟进' });
@@ -201,6 +215,18 @@ await checkAsync('评分保存 → 从未读移除 → 出现在回顾', async (
   assert.equal(history.total, 1);
   assert.equal(history.items[0].rating, 5);
   assert.equal(history.items[0].note, '值得跟进');
+});
+await checkAsync('修改评分/评语（回顾里改正）', async () => {
+  await dispatcher.dispatch('rate', { workspace, openalexId: 'W1001', doi: '10.1000/a', direction: 'dir-1', rating: 2, note: '', edit: true });
+  let history = await dispatcher.dispatch('history', { workspace, kind: 'rated' });
+  assert.equal(history.items[0].rating, 2);
+  assert.equal(history.items[0].note, '', '清空评语应生效');
+  const cards = await dispatcher.dispatch('cards', { workspace });
+  assert.equal(cards.total, 0, '修改评分后仍算已读');
+  await dispatcher.dispatch('rate', { workspace, openalexId: 'W1001', doi: '10.1000/a', direction: 'dir-1', rating: 5, note: '改回 5 分', edit: true });
+  history = await dispatcher.dispatch('history', { workspace, kind: 'rated' });
+  assert.equal(history.items[0].rating, 5);
+  assert.equal(history.items[0].note, '改回 5 分');
 });
 await checkAsync('方向统计：总计 = 待读 + 回顾', async () => {
   const summary = await dispatcher.dispatch('deck-summary', { workspace });
@@ -213,6 +239,9 @@ await checkAsync('设置读写', async () => {
   assert.equal(saved.settings.monthsBack, 2);
   const state = await dispatcher.dispatch('state', { workspace });
   assert.equal(state.settings.useFeedback, false);
+});
+check('测试隔离：最近工作区写入临时 DSH_HOME（不污染真实 ~/.dsh）', () => {
+  assert.ok(fs.existsSync(path.join(TEST_DSH_HOME, 'dsh-paper-agent', 'state.json')), '测试应把 host 状态写进临时 DSH_HOME');
 });
 
 // ---------------------------------------------------------------- 4. 本地数据通道
@@ -241,6 +270,7 @@ await checkAsync('本地数据通道可启动并响应', async () => {
 
 // ---------------------------------------------------------------- 5. AI 链路（假模型）
 let lastScreenPrompt = '';
+let lastRescreenPrompt = '';
 const fakeCtx = {
   get(name) {
     if (name === 'llm') {
@@ -254,8 +284,20 @@ const fakeCtx = {
             yield { type: 'text-delta', text: '偏好：偏应用型、重视工艺与性能的明确关联。' };
             return;
           }
-          if (prompt.includes('用户的研究描述')) {
+          if (prompt.includes('写一段「方向上下文」')) {
+            yield { type: 'text-delta', text: '初始上下文：关注锌沉积、界面调控与电解液；纯模拟与纯锂电不算。' };
+            return;
+          }
+          if (prompt.includes('只重新评估这一篇论文')) {
+            lastRescreenPrompt = prompt;
+            const id = [...prompt.matchAll(/openalexId=(W\d+)/g)].map((match) => match[1])[0];
             yield {
+              type: 'text-delta',
+              text: JSON.stringify({ openalexId: id, score: 5, zhTitle: '重筛标题', summary: '重筛梳理', comment: '重筛点评', abstractZh: '' }),
+            };
+            return;
+          }
+          if (prompt.includes('用户的研究描述')) {            yield {
               type: 'text-delta',
               text: JSON.stringify({
                 mode: 'text',
@@ -308,6 +350,21 @@ await fsp.writeFile(path.join(aiDir, 'feedback.jsonl'), [
   { doi: '10.1000/c', openalexId: 'W1003', direction: 'dir-1', rating: 1, ts: '2026-11-03T00:00:02.000Z' },
 ].map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
 await fsp.writeFile(path.join(aiDir, 'feedback-notes.jsonl'), JSON.stringify({ doi: '10.1000/b', openalexId: 'W1002', direction: 'dir-1', note: '纯模拟的不要', ts: '2026-11-03T00:00:01.000Z' }) + '\n', 'utf8');
+await fsp.writeFile(path.join(aiDir, 'directions.json'), JSON.stringify({
+  directions: [{
+    id: 'dir-1',
+    name: '测试方向',
+    enabled: true,
+    description: { object: 'zinc anode / aqueous zinc battery', focus: '锌沉积、界面调控、电解液', exclude: '纯模拟' },
+    mode: 'text',
+    text: { query: '("zinc anode") AND (aqueous)' },
+    context: '关注锌沉积与界面调控；纯模拟、纯锂电不算。',
+    contextUpdatedAt: '2026-11-01T00:00:00.000Z',
+    contextFeedbackCount: 3,
+    createdAt: '2026-11-01T00:00:00.000Z',
+    updatedAt: '2026-11-01T00:00:00.000Z',
+  }],
+}, null, 2) + '\n', 'utf8');
 const aiService = createService({ config: { stateDir: '.paper-agent' }, ctx: fakeCtx });
 
 await checkAsync('偏好摘要可由反馈生成', async () => {
@@ -322,15 +379,134 @@ await checkAsync('一键筛选：注入历史反馈', async () => {
   assert.ok(lastScreenPrompt.includes('用户历史反馈'), '提示词没有历史反馈段落');
   assert.ok(lastScreenPrompt.includes('偏好'), '提示词没有偏好摘要');
   assert.ok(lastScreenPrompt.includes('纯模拟的不要'), '提示词没有评语');
+  assert.ok(lastScreenPrompt.includes('方向：测试方向'), '提示词没有方向上下文');
+  assert.ok(lastScreenPrompt.includes('方向上下文：关注锌沉积'), '提示词没有方向上下文正文');
+  assert.ok(lastScreenPrompt.includes('评分规则（重要）'), '提示词没有方向匹配规则');
+  assert.ok(lastScreenPrompt.includes('至少 4 分'), '提示词没有「命中方向至少 4 分」规则');
+});
+await checkAsync('单篇重新打分 → 进入可看卡片', async () => {
+  const data = await aiService.rescreenPaper(aiWorkspace, { openalexId: 'W1004' });
+  assert.equal(data.score, 5);
+  const cards = await aiService.getCards(aiWorkspace, { minScore: 4, hideRead: true, limit: 100 });
+  assert.ok(cards.items.some((item) => item.openalexId === 'W1004'));
+});
+await checkAsync('手动提升为可看卡片', async () => {
+  await aiService.overrideScore(aiWorkspace, { openalexId: 'W1005', score: 4 });
+  const cards = await aiService.getCards(aiWorkspace, { minScore: 4, hideRead: true, limit: 100 });
+  assert.ok(cards.items.some((item) => item.openalexId === 'W1005'));
 });
 await checkAsync('一键配置：文字检索模式', async () => {
   const config = await aiService.autoConfigure(aiWorkspace, { description: '激光粉末床熔融 IN718 的组织与疲劳', mode: 'text' });
   assert.equal(config.mode, 'text');
   assert.ok(config.saved.condition.query.includes('LPBF'));
 });
+await checkAsync('新方向自动生成初始上下文', async () => {
+  const saved = await aiService.saveDirection(aiWorkspace, {
+    name: '上下文测试方向',
+    mode: 'text',
+    text: { query: '("zinc anode") AND (aqueous)' },
+    description: { object: 'zinc anode', focus: '锌沉积' },
+  });
+  assert.ok(saved.saved.context.includes('初始上下文'), '没有生成初始上下文');
+  const contexts = await aiService.getDirectionContexts(aiWorkspace);
+  const target = contexts.directions.find((direction) => direction.name === '上下文测试方向');
+  assert.ok(target && target.context.includes('初始上下文'), '设置里读不到方向上下文');
+});
+await checkAsync('方向上下文可随反馈重新生成', async () => {
+  const data = await aiService.refreshDirectionContext(aiWorkspace, { id: 'dir-1' });
+  assert.ok(data.direction.context.includes('初始上下文'), '重新生成后应使用模型输出');
+  assert.ok(data.direction.contextFeedbackCount >= 3, '应记录参考的反馈条数');
+});
+await checkAsync('方向上下文可手动编辑', async () => {
+  await aiService.saveDirectionContext(aiWorkspace, { id: 'dir-1', context: '手动编辑后的上下文：只看锌负极界面。' });
+  const contexts = await aiService.getDirectionContexts(aiWorkspace);
+  assert.equal(contexts.directions.find((direction) => direction.id === 'dir-1')?.context, '手动编辑后的上下文：只看锌负极界面。');
+});
+await checkAsync('点评人设进入筛选提示词', async () => {
+  await aiService.updateSettings(aiWorkspace, { commentPersona: '测试人设：只用短句，最多一句。' });
+  await aiService.rescreenPaper(aiWorkspace, { openalexId: 'W1004' });
+  assert.ok(lastRescreenPrompt.includes('测试人设：只用短句，最多一句。'), '人设没有进入提示词');
+});
+await checkAsync('批量重新打分', async () => {
+  const data = await aiService.rescreenMany(aiWorkspace, { openalexIds: ['W1001', 'W1002'] });
+  assert.equal(data.rescreened, 2);
+  assert.equal(data.failed, 0);
+});
+
+// 模型输出坏 JSON 时的容错：JSONL 重试 + 逐篇兜底
+const { parseScreenOutput } = await import(pathToFileURL(path.join(ROOT, 'lib/llm.js')).href);
+check('解析：代码块里的 JSONL', () => {
+  const rows = parseScreenOutput('```json\n{"openalexId":"W1","score":4}\n{"openalexId":"W2","score":5}\n```');
+  assert.equal(rows.length, 2);
+});
+check('解析：数组尾逗号可修复', () => {
+  const rows = parseScreenOutput('[{"openalexId":"W1","score":4,},]');
+  assert.equal(rows.length, 1);
+});
+
+const flakyWorkspace = await fsp.mkdtemp(path.join(os.tmpdir(), 'paper-agent-flaky-'));
+await fsp.mkdir(path.join(flakyWorkspace, '.paper-agent'), { recursive: true });
+await fsp.writeFile(path.join(flakyWorkspace, '.paper-agent', 'library.jsonl'), [
+  { openalexId: 'W2001', doi: '10.2000/a', title: 'Flaky A', directions: ['dir-1'], abstract: 'x' },
+  { openalexId: 'W2002', doi: '10.2000/b', title: 'Flaky B', directions: ['dir-1'], abstract: 'x' },
+].map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
+const flakyCtx = {
+  get(name) {
+    if (name === 'llm') {
+      return {
+        stream: async function* (request) {
+          const prompt = request.messages?.[0]?.content?.[0]?.text ?? '';
+          const ids = [...prompt.matchAll(/openalexId=(W\d+)/g)].map((match) => match[1]);
+          if (prompt.includes('共 1 行')) {
+            yield { type: 'text-delta', text: JSON.stringify({ openalexId: ids[0], score: 4, zhTitle: '标题', summary: '梳理', comment: '点评', abstractZh: '' }) };
+            return;
+          }
+          yield { type: 'text-delta', text: '{"openalexId": "W2001", "score": 4, "comment": "他说"好"}]' };
+        },
+      };
+    }
+    if (name === 'agentDefaultModel') return { currentSelection: () => ({ provider: 'p', model: 'm' }) };
+    return undefined;
+  },
+};
+const flakyService = createService({ config: { stateDir: '.paper-agent' }, ctx: flakyCtx });
+await checkAsync('坏 JSON：重试 + 逐篇兜底', async () => {
+  const result = await flakyService.autoScreen(flakyWorkspace, { limit: 2 });
+  assert.equal(result.screened, 2);
+});
+
+// 分类：不再按 directions[0] 取第一个，而是按方向语义匹配
+const classifyWorkspace = await fsp.mkdtemp(path.join(os.tmpdir(), 'paper-agent-classify-'));
+await fsp.mkdir(path.join(classifyWorkspace, '.paper-agent'), { recursive: true });
+const classifyDir = path.join(classifyWorkspace, '.paper-agent');
+await fsp.writeFile(path.join(classifyDir, 'directions.json'), JSON.stringify({
+  directions: [
+    { id: 'am', name: '增材制造 IN718', enabled: true, mode: 'text', description: { object: 'Inconel 718 / IN718 / Ni-based superalloy', focus: 'LPBF / SLM / 增材制造的组织、缺陷与力学性能', exclude: '纯铸造' }, context: '关注增材制造工艺与组织。', text: { query: '("LPBF") AND ("IN718")' } },
+    { id: 'syn', name: '同步辐射成像与衍射', enabled: true, mode: 'text', description: { object: 'synchrotron / X-ray imaging / diffraction', focus: '同步辐射光源上的成像、衍射、断层', exclude: '实验室 XRD' }, context: '关注同步辐射方法学。', text: { query: 'synchrotron AND diffraction' } },
+  ],
+}, null, 2) + '\n', 'utf8');
+await fsp.writeFile(path.join(classifyDir, 'library.jsonl'), [
+  { openalexId: 'W3001', title: 'Origins of heterogeneous microstructure in additively manufactured Ti-6Al-4V–SS316L alloy amalgamation', abstract: 'laser powder bed fusion multi-material microstructure', directions: ['syn', 'am'], keywords: [] },
+  { openalexId: 'W3002', title: 'High-energy synchrotron X-ray diffraction study of residual stress', abstract: 'in situ synchrotron diffraction and tomography', directions: ['am', 'syn'], keywords: [] },
+].map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
+await fsp.writeFile(path.join(classifyDir, 'screenings.jsonl'), [
+  { openalexId: 'W3001', score: 5, zhTitle: '钛合金多材料', summary: '', comment: '', abstractZh: '', direction: 'syn' },
+  { openalexId: 'W3002', score: 5, zhTitle: '同步辐射残余应力', summary: '', comment: '', abstractZh: '', direction: 'am' },
+].map((row) => JSON.stringify(row)).join('\n') + '\n', 'utf8');
+const classifyService = createService({ config: { stateDir: '.paper-agent' } });
+await checkAsync('分类：按语义匹配方向而非 directions[0]', async () => {
+  const cards = await classifyService.getCards(classifyWorkspace, { minScore: 4, hideRead: true, limit: 100 });
+  const amPaper = cards.items.find((item) => item.openalexId === 'W3001');
+  const synPaper = cards.items.find((item) => item.openalexId === 'W3002');
+  assert.equal(amPaper?.direction, 'am', '增材制造论文应归到增材制造方向');
+  assert.equal(synPaper?.direction, 'syn', '同步辐射论文应归到同步辐射方向');
+  const summary = await classifyService.getDeckSummary(classifyWorkspace);
+  assert.equal(summary.byDirection.am?.total, 1);
+  assert.equal(summary.byDirection.syn?.total, 1);
+});
 
 // ---------------------------------------------------------------- 清理
-for (const dir of [workspace, aiWorkspace]) {
+for (const dir of [workspace, aiWorkspace, flakyWorkspace, classifyWorkspace, TEST_DSH_HOME]) {
   await fsp.rm(dir, { recursive: true, force: true });
 }
 delete globalThis.window;

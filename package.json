@@ -1,6 +1,6 @@
 {
   "name": "dsh-paper-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "DSH 文献助手：按研究方向从 OpenAlex 拉取论文、AI 打分筛选、卡片式阅读，并根据用户反馈校准筛选。",
   "type": "module",
   "main": "lib/index.js",
