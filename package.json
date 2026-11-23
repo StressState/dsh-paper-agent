@@ -8,10 +8,12 @@
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./icon": "./icon.png"
   },
   "files": [
     "lib",
+    "icon.png",
     "locale",
     "test",
     "cordis.patch.yml",

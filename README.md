@@ -5,6 +5,8 @@
 > **越反馈越懂你，推荐文献越准确。**
 > 每一次评分、每一句评语都会进入本地反馈库，用来调整之后每次 AI 筛选的口径。
 
+<img src="docs/images/promo-cover.jpg" width="420" alt="文献助手：越反馈越懂你">
+
 ## 它解决什么
 
 每天新论文太多，真正相关的没几篇。文献助手把「找、筛、读、评」收进一个页面：
@@ -21,12 +23,16 @@
 3. **可纠错**：误筛的文献能单篇/批量重新打分，或手动提升为可看卡片；
 4. **可控制**：模型、推理强度、筛选门槛、点评人设都能在设置里改；不想用反馈就一键关闭。
 
+## 界面预览
+
+<img src="docs/images/promo-map.jpg" width="420" alt="一张图看懂反馈闭环"> <img src="docs/images/promo-knowledge.jpg" width="420" alt="它记住了什么 / 下一次怎么用">
+
 ## 安装
 
 需要 DeepSeek Harness 0.2.x 桌面版。
 
 ```bash
-# 从 GitHub（当前为私有仓库，需要仓库访问权限）
+# 从 GitHub（公开仓库）
 dsh plugin --profile desktop add github:StressState/dsh-paper-agent
 
 # 或者本地目录 / tarball
