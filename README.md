@@ -70,6 +70,12 @@ npm test   # 离线自检：渲染、数据服务、本地通道、假模型 AI 
 
 零第三方运行时依赖，只使用 Node 内置模块；要求 Node ≥ 20。
 
+## 反馈与共建
+
+欢迎测评使用、提 Issue、一起改进：https://github.com/StressState/dsh-paper-agent/issues
+
+如果你也在做文献筛选/推送，欢迎交流你的工作流和痛点。
+
 ## 许可
 
 MIT
